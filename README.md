@@ -19,7 +19,6 @@ When active:
 - **Optional display awake** - Check "Keep Display Awake" to prevent screen from sleeping
 - **Duration options** - Set a timer (15 min, 1 hour, 3 hours, custom, or indefinite)
 - **Live countdown** - See remaining time in the menu bar
-- **Global keyboard shortcut** - Toggle from anywhere
 - **Launch at login** - Start automatically when you log in (macOS 13+)
 
 ## Installation
@@ -46,7 +45,6 @@ The app is signed and notarized by Apple, so it will open without any security w
 2. **Right-click** to access settings:
    - Duration - Choose how long to stay awake (15 min, 1 hour, 3 hours, custom, or indefinite)
    - Keep Display Awake - Check this to also prevent your screen from sleeping
-   - Assign Shortcut - Set a keyboard shortcut to toggle from anywhere
    - Start at Login - Launch automatically when you log in
 
 ### Menu Bar Icon
@@ -65,7 +63,3 @@ The app is signed and notarized by Apple, so it will open without any security w
 ## Requirements
 
 - macOS 11.0 (Big Sur) or later
-
-## Notes
-
-To use keyboard shortcuts, grant Accessibility permissions when prompted.

@@ -21,8 +21,8 @@ CaffeineMate is a macOS menu bar application that prevents the system from going
 
 - Primary controller managing the menu bar UI and user interactions
 - Handles left-click (toggle) and right-click (menu) on status bar icon
-- Updates status bar display with countdown timer when active
-- Coordinates between PowerAssertionManager, SettingsManager, and ShortcutMonitor
+- Updates the status bar when PowerAssertionManager reports a change
+- Coordinates between PowerAssertionManager and SettingsManager
 
 **PowerAssertionManager** (`PowerAssertionManager.swift:11`)
 
@@ -30,19 +30,13 @@ CaffeineMate is a macOS menu bar application that prevents the system from going
 - Creates two types of assertions:
   - System assertion (`kIOPMAssertionTypePreventUserIdleSystemSleep`) - always created when active
   - Display assertion (`kIOPMAssertionTypeNoDisplaySleep`) - created only if "Keep Display Awake" is enabled
-- Manages duration timer with countdown that auto-deactivates when expired
+- Uses one timer to refresh the elapsed-time countdown and release assertions at expiration
 - All state changes flow through this manager (activate/deactivate/toggle)
 
 **SettingsManager** (`SettingsManager.swift:10`)
 
 - Singleton persisting user preferences to UserDefaults
-- Stores: keepDisplayAwake, awakeDuration (minutes, 0=indefinite), launchAtLogin, keyboard shortcut
-
-**ShortcutMonitor** (`ShortcutMonitor.swift:10`)
-
-- Manages global keyboard shortcuts using NSEvent monitors
-- Requires Accessibility permissions to capture key events system-wide
-- Uses both global and local monitors to capture shortcuts regardless of app focus
+- Stores display, duration, and launch-at-login preferences
 
 **LaunchAtLoginManager** (`LaunchAtLoginManager.swift:12`)
 
@@ -52,9 +46,8 @@ CaffeineMate is a macOS menu bar application that prevents the system from going
 ### Data Flow
 
 1. User clicks status bar icon → AppDelegate toggles → PowerAssertionManager activates/deactivates → IOKit assertions created/released
-2. Settings changed in menu → SettingsManager persists → If active, PowerAssertionManager re-activates with new settings
-3. Keyboard shortcut pressed → ShortcutMonitor detects → Triggers same toggle flow as status bar click
-4. Timer running → PowerAssertionManager updates remainingSeconds every second → AppDelegate updates menu bar display
+2. Menu settings changed → PowerAssertionManager applies them if active → SettingsManager persists them on success
+3. Timed session running → PowerAssertionManager calculates time remaining from the deadline → AppDelegate updates the menu bar
 
 ## Key Behaviors
 
@@ -62,7 +55,6 @@ CaffeineMate is a macOS menu bar application that prevents the system from going
 - **Indefinite mode**: No countdown, stays active until manually toggled off
 - **Display vs System**: System assertion always created. Display assertion only when "Keep Display Awake" is checked
 - **Settings persistence**: All settings survive app restarts via UserDefaults
-- **Accessibility permissions**: Required only for global keyboard shortcuts, prompted when user assigns a shortcut
 
 ## Entitlements
 

@@ -17,8 +17,6 @@ class SettingsManager {
         static let keepDisplayAwake = "keepDisplayAwake"
         static let awakeDuration = "awakeDuration"
         static let launchAtLogin = "launchAtLogin"
-        static let shortcutKey = "shortcutKey"
-        static let shortcutModifiers = "shortcutModifiers"
     }
 
     private init() {}
@@ -56,26 +54,6 @@ class SettingsManager {
         }
     }
 
-    // MARK: - Keyboard Shortcut
-
-    var shortcutKey: String? {
-        get {
-            defaults.string(forKey: Keys.shortcutKey)
-        }
-        set {
-            defaults.set(newValue, forKey: Keys.shortcutKey)
-        }
-    }
-
-    var shortcutModifiers: UInt {
-        get {
-            UInt(defaults.integer(forKey: Keys.shortcutModifiers))
-        }
-        set {
-            defaults.set(Int(newValue), forKey: Keys.shortcutModifiers)
-        }
-    }
-
     // MARK: - Convenience Methods
 
     func getDurationMinutes() -> Int {
@@ -90,7 +68,5 @@ class SettingsManager {
         keepDisplayAwake = false
         awakeDuration = 0
         launchAtLogin = false
-        shortcutKey = nil
-        shortcutModifiers = 0
     }
 }

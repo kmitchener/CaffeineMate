@@ -7,14 +7,15 @@
 
 import AppKit
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
-    private var updateTimer: Timer?
+    private let inactiveIcon = AppDelegate.statusIcon("cup.and.saucer")
+    private let activeIcon = AppDelegate.statusIcon("cup.and.saucer.fill")
 
     private let powerManager = PowerAssertionManager.shared
     private let settings = SettingsManager.shared
-    private let shortcutMonitor = ShortcutMonitor.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Create status bar item with variable length to accommodate countdown
@@ -22,6 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let button = statusItem.button {
             // Set up click handlers
+            button.target = self
             button.action = #selector(statusBarButtonClicked(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
@@ -32,37 +34,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize menu checkmarks with stored preferences
         updateMenuCheckmarks()
 
-        // Set up shortcut monitor
-        shortcutMonitor.onShortcutPressed = { [weak self] in
-            self?.toggleAwakeMode()
+        powerManager.onStatusChanged = { [weak self] remainingSeconds in
+            self?.updateStatusBarDisplay(remainingSeconds: remainingSeconds)
         }
-        shortcutMonitor.startMonitoring()
-
-        // Set up power manager state change callback
-        powerManager.onStateChanged = { [weak self] in
-            self?.updateStatusBarDisplay()
-        }
-
-        // Initial display update (timer will be started only if countdown is active)
-        updateStatusBarDisplay()
+        updateStatusBarDisplay(remainingSeconds: nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Clean up - release all power assertions
+        powerManager.onStatusChanged = nil
         powerManager.deactivate()
-        updateTimer?.invalidate()
-    }
-
-    deinit {
-        updateTimer?.invalidate()
-        updateTimer = nil
-        shortcutMonitor.stopMonitoring()
     }
 
     @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {
-        let event = NSApp.currentEvent!
-
-        if event.type == .rightMouseUp {
+        if NSApp.currentEvent?.type == .rightMouseUp {
             // Right click - show menu
             // Refresh menu checkmarks to reflect current settings
             updateMenuCheckmarks()
@@ -89,7 +73,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let durationMenuItem = NSMenuItem(title: "Duration", action: nil, keyEquivalent: "")
         durationMenuItem.submenu = durationMenu
         menu.addItem(durationMenuItem)
-        
+
         // Keep Display Awake
         menu.addItem(NSMenuItem(title: "Keep Display Awake", action: #selector(toggleKeepDisplayAwake), keyEquivalent: ""))
 
@@ -97,9 +81,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Start at Login
         menu.addItem(NSMenuItem(title: "Start at Login", action: #selector(toggleStartAtLogin), keyEquivalent: ""))
-
-        // Assign Shortcut
-        menu.addItem(NSMenuItem(title: "Assign Shortcut...", action: #selector(assignShortcut), keyEquivalent: ""))
 
         menu.addItem(NSMenuItem.separator())
 
@@ -110,48 +91,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func toggleAwakeMode() {
-        powerManager.toggle(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: settings.awakeDuration)
-        // Display will update automatically via onStateChanged callback
+        do {
+            try powerManager.toggle(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: settings.awakeDuration)
+        } catch {
+            showAssertionError(error)
+        }
     }
 
     @objc private func toggleKeepDisplayAwake() {
-        settings.keepDisplayAwake.toggle()
-        if powerManager.isActive {
-            powerManager.activate(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: settings.awakeDuration)
-        }
-        updateMenuCheckmarks()
+        applyAwakeSettings(keepDisplayAwake: !settings.keepDisplayAwake, durationMinutes: settings.awakeDuration)
     }
 
     @objc private func setIndefiniteDuration() {
-        settings.awakeDuration = 0
-        if powerManager.isActive {
-            powerManager.activate(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 0)
-        }
-        updateMenuCheckmarks()
+        applyAwakeSettings(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 0)
     }
 
     @objc private func set15MinDuration() {
-        settings.awakeDuration = 15
-        if powerManager.isActive {
-            powerManager.activate(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 15)
-        }
-        updateMenuCheckmarks()
+        applyAwakeSettings(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 15)
     }
 
     @objc private func set1HourDuration() {
-        settings.awakeDuration = 60
-        if powerManager.isActive {
-            powerManager.activate(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 60)
-        }
-        updateMenuCheckmarks()
+        applyAwakeSettings(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 60)
     }
 
     @objc private func set3HoursDuration() {
-        settings.awakeDuration = 180
-        if powerManager.isActive {
-            powerManager.activate(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 180)
-        }
-        updateMenuCheckmarks()
+        applyAwakeSettings(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: 180)
     }
 
     @objc private func setCustomDuration() {
@@ -165,15 +129,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         inputTextField.placeholderString = "Minutes"
         alert.accessoryView = inputTextField
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            if let minutes = Int(inputTextField.stringValue), minutes > 0 {
-                settings.awakeDuration = minutes
-                if powerManager.isActive {
-                    powerManager.activate(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: minutes)
-                }
-                updateMenuCheckmarks()
+        if alert.runModal() == .alertFirstButtonReturn,
+           let minutes = Int(inputTextField.stringValue), minutes > 0 {
+            applyAwakeSettings(keepDisplayAwake: settings.keepDisplayAwake, durationMinutes: minutes)
+        }
+    }
+
+    private func applyAwakeSettings(keepDisplayAwake: Bool, durationMinutes: Int) {
+        do {
+            if powerManager.isActive {
+                try powerManager.activate(keepDisplayAwake: keepDisplayAwake, durationMinutes: durationMinutes)
             }
+            settings.keepDisplayAwake = keepDisplayAwake
+            settings.awakeDuration = durationMinutes
+            updateMenuCheckmarks()
+        } catch {
+            showAssertionError(error)
         }
     }
 
@@ -182,139 +153,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateMenuCheckmarks()
     }
 
-    @objc private func assignShortcut() {
+    private func showAssertionError(_ error: Error) {
         let alert = NSAlert()
-        alert.messageText = "Assign Keyboard Shortcut"
-
-        if let currentShortcut = shortcutMonitor.getShortcutDescription() {
-            alert.informativeText = "Current shortcut: \(currentShortcut)\n\nPress a new key combination (must include ⌘, ⌃, or ⌥)"
-        } else {
-            alert.informativeText = "Press a key combination (must include ⌘, ⌃, or ⌥)"
-        }
-
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Clear")
-
-        // Create custom shortcut capture field
-        let captureField = ShortcutCaptureField(frame: NSRect(x: 0, y: 0, width: 250, height: 24))
-
-        var capturedKey: String?
-        var capturedModifiers: NSEvent.ModifierFlags?
-
-        captureField.onShortcutCaptured = { key, modifiers in
-            capturedKey = key
-            capturedModifiers = modifiers
-        }
-
-        // Show current shortcut if exists
-        if let currentShortcut = shortcutMonitor.getShortcutDescription() {
-            captureField.stringValue = currentShortcut
-        }
-
-        alert.accessoryView = captureField
-
-        // Make the capture field first responder after window appears
-        DispatchQueue.main.async {
-            alert.window.makeFirstResponder(captureField)
-        }
-
-        let response = alert.runModal()
-
-        if response == .alertFirstButtonReturn {
-            // OK button - save shortcut if one was captured
-            if let key = capturedKey, let modifiers = capturedModifiers {
-                // Check for Accessibility permissions
-                if !checkAccessibilityPermissions() {
-                    showAccessibilityPermissionAlert()
-                    return
-                }
-
-                shortcutMonitor.updateShortcut(key: key, modifiers: modifiers)
-                updateMenuCheckmarks()
-            } else if captureField.stringValue.isEmpty {
-                // User cleared the field - remove shortcut
-                shortcutMonitor.clearShortcut()
-                updateMenuCheckmarks()
-            }
-        } else if response == .alertThirdButtonReturn {
-            // Clear button
-            shortcutMonitor.clearShortcut()
-            updateMenuCheckmarks()
-        }
-        // Cancel button - do nothing
-    }
-
-    private func checkAccessibilityPermissions() -> Bool {
-        return AXIsProcessTrusted()
-    }
-
-    private func showAccessibilityPermissionAlert() {
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permission Required"
-        alert.informativeText = "CaffeineMate needs Accessibility permission to use global keyboard shortcuts.\n\nPlease:\n1. Open System Settings\n2. Go to Privacy & Security → Accessibility\n3. Enable CaffeineMate\n4. Try setting the shortcut again"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Cancel")
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            // Open System Settings to Accessibility pane
-            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-        }
+        alert.alertStyle = .warning
+        alert.messageText = "Couldn’t Change Awake Mode"
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
     }
 
     // MARK: - UI Updates
 
-    private func updateStatusBarDisplay() {
+    private static func statusIcon(_ name: String) -> NSImage? {
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "CaffeineMate")
+        image?.isTemplate = true
+        return image
+    }
+
+    private func updateStatusBarDisplay(remainingSeconds: Int?) {
         guard let button = statusItem.button else { return }
 
-        // Update icon
-        let iconName = powerManager.isActive ? "cup.and.saucer.fill" : "cup.and.saucer"
-        button.image = NSImage(systemSymbolName: iconName, accessibilityDescription: "CaffeineMate")
-        button.image?.isTemplate = true
+        let isActive = powerManager.isActive
+        let icon = isActive ? activeIcon : inactiveIcon
+        if button.image !== icon {
+            button.image = icon
+        }
 
-        // Update countdown text and tooltip
-        if powerManager.isActive {
-            let modeString = settings.keepDisplayAwake ? "System & Display" : "System"
-
-            // Show countdown in menu bar if duration is set
-            if powerManager.remainingSeconds > 0 {
-                let countdownText = formatCountdown(powerManager.remainingSeconds)
-                button.title = " \(countdownText)"
-                button.toolTip = "CaffeineMate Active (\(modeString))\n\(powerManager.getRemainingTimeString() ?? "")"
-
-                // Ensure timer is running for countdown updates
-                startUpdateTimerIfNeeded()
-            } else {
-                // Indefinite mode - no countdown
-                button.title = ""
-                button.toolTip = "CaffeineMate Active (\(modeString))\nIndefinite"
-
-                // Stop timer when in indefinite mode (no countdown to update)
-                stopUpdateTimer()
-            }
-        } else {
+        guard isActive else {
             button.title = ""
             button.toolTip = "CaffeineMate (Inactive)\nClick to activate"
-
-            // Stop timer when inactive
-            stopUpdateTimer()
+            return
         }
-    }
 
-    private func startUpdateTimerIfNeeded() {
-        // Only start timer if it's not already running
-        guard updateTimer == nil else { return }
-
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateStatusBarDisplay()
-        }
-    }
-
-    private func stopUpdateTimer() {
-        updateTimer?.invalidate()
-        updateTimer = nil
+        let mode = powerManager.keepDisplayAwake ? "System & Display" : "System"
+        let countdown = remainingSeconds.map(formatCountdown)
+        button.title = countdown.map { " \($0)" } ?? ""
+        let duration = countdown.map { "\($0) remaining" } ?? "Indefinite"
+        button.toolTip = "CaffeineMate Active (\(mode))\n\(duration)"
     }
 
     private func formatCountdown(_ seconds: Int) -> String {
@@ -323,9 +197,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let secs = seconds % 60
 
         if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+            return String(format: "%ld:%02ld:%02ld", hours, minutes, secs)
         } else {
-            return String(format: "%d:%02d", minutes, secs)
+            return String(format: "%ld:%02ld", minutes, secs)
         }
     }
 
@@ -358,15 +232,5 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Update launch at login checkmark
         menu.item(withTitle: "Start at Login")?.state = LaunchAtLoginManager.shared.isEnabled ? .on : .off
-
-        // Update shortcut menu item to show current shortcut
-        if let shortcutMenuItem = menu.items.first(where: { $0.action == #selector(assignShortcut) }) {
-            if let shortcut = shortcutMonitor.getShortcutDescription() {
-                shortcutMenuItem.title = "Shortcut: \(shortcut)"
-            } else {
-                shortcutMenuItem.title = "Assign Shortcut..."
-            }
-        }
     }
 }
-

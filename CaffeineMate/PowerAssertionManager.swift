@@ -5,142 +5,134 @@
 //  Created by Edd on 07/10/2025.
 //
 
+import Darwin
 import Foundation
 import IOKit.pwr_mgt
 
+@MainActor
 class PowerAssertionManager {
     static let shared = PowerAssertionManager()
 
-    private var displayAssertionID: IOPMAssertionID = 0
-    private var systemAssertionID: IOPMAssertionID = 0
+    private var displayAssertionID: IOPMAssertionID?
+    private var systemAssertionID: IOPMAssertionID?
+    private var deadline: TimeInterval?
     private var durationTimer: Timer?
 
-    private(set) var isActive: Bool = false
-    private(set) var keepDisplayAwake: Bool = false
-    private(set) var remainingSeconds: Int = 0
+    var isActive: Bool { systemAssertionID != nil }
+    var keepDisplayAwake: Bool { displayAssertionID != nil }
 
-    // Callback invoked when state changes (activate/deactivate)
-    var onStateChanged: (() -> Void)?
+    // A nil countdown means the session is inactive or indefinite.
+    var onStatusChanged: ((Int?) -> Void)?
 
     private init() {}
 
-    // MARK: - Public Methods
-
-    func activate(keepDisplayAwake: Bool, durationMinutes: Int = 0) {
-        // Deactivate any existing assertions first
-        deactivate()
-
-        self.keepDisplayAwake = keepDisplayAwake
-
-        // Always create system sleep prevention assertion
-        createSystemAssertion()
-
-        // Conditionally create display sleep prevention assertion
-        if keepDisplayAwake {
-            createDisplayAssertion()
+    func activate(keepDisplayAwake: Bool, durationMinutes: Int) throws {
+        var newSystemAssertion: IOPMAssertionID?
+        if !isActive {
+            newSystemAssertion = try createAssertion(
+                type: kIOPMAssertionTypePreventUserIdleSystemSleep,
+                name: "CaffeineMate: Preventing System Sleep"
+            )
         }
 
-        isActive = true
-
-        // Set up duration timer if specified
-        if durationMinutes > 0 {
-            remainingSeconds = durationMinutes * 60
-            startDurationTimer()
-        } else {
-            remainingSeconds = 0
+        do {
+            if keepDisplayAwake && !self.keepDisplayAwake {
+                displayAssertionID = try createAssertion(
+                    type: kIOPMAssertionTypeNoDisplaySleep,
+                    name: "CaffeineMate: Preventing Display Sleep"
+                )
+            }
+        } catch {
+            // Roll back a partial activation without interrupting an existing session.
+            Self.releaseAssertion(&newSystemAssertion)
+            throw error
         }
 
-        // Notify listeners that state has changed
-        onStateChanged?()
+        if let newSystemAssertion {
+            systemAssertionID = newSystemAssertion
+        }
+        if !keepDisplayAwake {
+            Self.releaseAssertion(&displayAssertionID)
+        }
+
+        setCountdown(durationMinutes: durationMinutes)
+        onStatusChanged?(remainingSeconds)
     }
 
     func deactivate() {
-        // Release all assertions if active
-        if displayAssertionID != 0 {
-            IOPMAssertionRelease(displayAssertionID)
-            displayAssertionID = 0
-        }
-
-        if systemAssertionID != 0 {
-            IOPMAssertionRelease(systemAssertionID)
-            systemAssertionID = 0
-        }
-
-        // Stop timer
-        durationTimer?.invalidate()
-        durationTimer = nil
-
-        isActive = false
-        keepDisplayAwake = false
-        remainingSeconds = 0
-
-        // Notify listeners that state has changed
-        onStateChanged?()
+        Self.releaseAssertion(&displayAssertionID)
+        Self.releaseAssertion(&systemAssertionID)
+        setCountdown(durationMinutes: 0)
+        onStatusChanged?(nil)
     }
 
-    func toggle(keepDisplayAwake: Bool, durationMinutes: Int = 0) {
+    func toggle(keepDisplayAwake: Bool, durationMinutes: Int) throws {
         if isActive {
             deactivate()
         } else {
-            activate(keepDisplayAwake: keepDisplayAwake, durationMinutes: durationMinutes)
+            try activate(keepDisplayAwake: keepDisplayAwake, durationMinutes: durationMinutes)
         }
     }
 
-    // MARK: - Private Methods
-
-    private func createDisplayAssertion() {
+    private func createAssertion(type: String, name: String) throws -> IOPMAssertionID {
+        var assertionID: IOPMAssertionID = 0
         let result = IOPMAssertionCreateWithName(
-            kIOPMAssertionTypeNoDisplaySleep as CFString,
+            type as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "CaffeineMate: Preventing Display Sleep" as CFString,
-            &displayAssertionID
+            name as CFString,
+            &assertionID
         )
 
-        if result != kIOReturnSuccess {
-            print("Error creating display assertion: \(result)")
+        guard result == kIOReturnSuccess else {
+            throw PowerAssertionError(message: "\(name) failed (IOKit error \(result)).")
         }
+        return assertionID
     }
 
-    private func createSystemAssertion() {
-        let result = IOPMAssertionCreateWithName(
-            kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
-            IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "CaffeineMate: Preventing System Sleep" as CFString,
-            &systemAssertionID
-        )
-
-        if result != kIOReturnSuccess {
-            print("Error creating system assertion: \(result)")
-        }
+    private static func releaseAssertion(_ id: inout IOPMAssertionID?) {
+        guard let assertionID = id else { return }
+        IOPMAssertionRelease(assertionID)
+        id = nil
     }
 
-    private func startDurationTimer() {
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
+    private func setCountdown(durationMinutes: Int) {
+        durationTimer?.invalidate()
+        durationTimer = nil
+        deadline = nil
+        guard durationMinutes > 0 else { return }
 
-            if self.remainingSeconds > 0 {
-                self.remainingSeconds -= 1
-            } else {
-                // Time's up - deactivate
-                self.deactivate()
+        deadline = monotonicTime + TimeInterval(durationMinutes) * 60
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            // The timer is installed on the main run loop.
+            MainActor.assumeIsolated {
+                self?.updateCountdown()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         durationTimer = timer
     }
 
-    // MARK: - Utility Methods
+    private var monotonicTime: TimeInterval {
+        TimeInterval(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) / 1_000_000_000
+    }
 
-    func getRemainingTimeString() -> String? {
-        guard remainingSeconds > 0 else { return nil }
+    private var remainingSeconds: Int? {
+        guard let deadline else { return nil }
+        let seconds = max(0, (deadline - monotonicTime).rounded(.up))
+        return Int(exactly: seconds) ?? Int.max
+    }
 
-        let hours = remainingSeconds / 3600
-        let minutes = (remainingSeconds % 3600) / 60
-
-        if hours > 0 {
-            return "\(hours)h \(minutes)m remaining"
+    private func updateCountdown() {
+        if let remainingSeconds, remainingSeconds > 0 {
+            onStatusChanged?(remainingSeconds)
         } else {
-            return "\(minutes)m remaining"
+            deactivate()
         }
     }
+}
+
+private struct PowerAssertionError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
 }
